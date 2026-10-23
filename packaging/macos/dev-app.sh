@@ -17,8 +17,9 @@ cargo build --release --locked -p agt
 
 APP="$OUT/AGT.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/agt "$APP/Contents/MacOS/agt"
+cp packaging/macos/AGT.icns "$APP/Contents/Resources/"
 sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 
 # Same as vpk: hardened runtime and our entitlements only.

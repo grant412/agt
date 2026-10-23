@@ -11,6 +11,9 @@
     <string>io.notics.agt</string>
     <key>CFBundleExecutable</key>
     <string>agt</string>
+    <!-- Contents/Resources/AGT.icns, drawn by make_icon.py. -->
+    <key>CFBundleIconFile</key>
+    <string>AGT</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
