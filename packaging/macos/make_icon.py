@@ -5,7 +5,7 @@
 """Draws AGT's macOS app icon, packaging/macos/AGT.icns: the tray's ring and dot (see
 `rgba` in crates/app/src/tray.rs) on a macOS icon tile.
 
-    uv run packaging/macos/make_icon.py [--style blue|graphite|light] [--png out.png]
+    uv run packaging/macos/make_icon.py [--style graphite|blue|light] [--png out.png]
 """
 
 import argparse
@@ -118,7 +118,7 @@ def write_icns(master: Image.Image, path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--style", choices=STYLES, default="blue")
+    parser.add_argument("--style", choices=STYLES, default="graphite")
     parser.add_argument("--png", type=Path, help="also save the 1024 px master here")
     parser.add_argument("--icns", type=Path, default=Path(__file__).with_name("AGT.icns"))
     args = parser.parse_args()
