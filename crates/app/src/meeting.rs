@@ -296,6 +296,7 @@ impl Meetings {
             Phase::Recording(_) => self.stop(None),
             Phase::Starting { .. } | Phase::Finishing(_) => {}
         }
+        self.sync_dock();
     }
 
     /// "Meeting notes...", the pill's Notes: the notes window, on the live meeting if one
@@ -313,6 +314,7 @@ impl Meetings {
         if new {
             self.send_notices();
         }
+        self.sync_dock();
     }
 
     /// The speech model's state changed (or may have): a meeting waiting for it hears so.
@@ -364,12 +366,25 @@ impl Meetings {
             Msg::Ui(UiEvent::Notes(m)) => self.notes_message(m, event_loop, pipeline),
             Msg::Ui(UiEvent::Pill(m)) => self.pill_message(m, event_loop, pipeline),
             Msg::Ui(UiEvent::PillLoaded) => self.ui.pill_loaded(),
+            Msg::Ui(UiEvent::Dock) => self.open_window(event_loop),
         }
+        self.sync_dock();
     }
 
     /// Returns whether the event was for one of the meeting windows.
     pub fn window_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
-        self.ui.window_event(id, event)
+        let ours = self.ui.window_event(id, event);
+        if ours {
+            self.sync_dock();
+        }
+        ours
+    }
+
+    /// AGT is in the Dock while a meeting is on and while the notes window is open, so a
+    /// click there brings the notes back ([`UiEvent::Dock`]).
+    fn sync_dock(&mut self) {
+        let on = self.in_meeting() || self.ui.notes_visible();
+        self.ui.set_dock(on);
     }
 
     pub fn next_tick(&self) -> Option<Instant> {

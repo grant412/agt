@@ -172,6 +172,8 @@ pub enum UiEvent {
     Notes(FromNotes),
     Pill(FromPill),
     PillLoaded,
+    /// A click on AGT's Dock icon (macOS, while it's in the Dock: see [`Ui::set_dock`]).
+    Dock,
 }
 
 /// To the notes page.
@@ -707,6 +709,8 @@ pub struct Ui {
     /// notes window every [`TICK`].
     meters: Option<(Level, Level)>,
     next: Instant,
+    /// AGT shows in the Dock ([`Self::set_dock`]).
+    in_dock: bool,
 }
 
 struct Pill {
@@ -743,6 +747,7 @@ impl Ui {
             notes: None,
             meters: None,
             next: Instant::now(),
+            in_dock: false,
         }
     }
 
@@ -913,14 +918,13 @@ impl Ui {
         let window = event_loop.create_window(attrs).map_err(|e| e.to_string())?;
         native::install_menu();
         let ipc = self.proxy.clone();
-        let webview = load(locked(WebViewBuilder::new(), Page::Notes), Page::Notes)
+        let builder = load(locked(WebViewBuilder::new(), Page::Notes), Page::Notes)
             .with_ipc_handler(move |req| {
                 if let Some(m) = from_page(Page::Notes, &req) {
                     post(&ipc, UiEvent::Notes(m));
                 }
-            })
-            .build(&window)
-            .map_err(|e| e.to_string())?;
+            });
+        let webview = native::notes_webview(builder, &window).map_err(|e| e.to_string())?;
         Ok(Notes {
             window,
             webview,
@@ -980,6 +984,15 @@ impl Ui {
             self.hide_notes();
         }
         true
+    }
+
+    /// Puts AGT in the Dock or takes it out (macOS; elsewhere the notes window has its own
+    /// taskbar button). A click on the Dock icon posts [`UiEvent::Dock`].
+    pub fn set_dock(&mut self, on: bool) {
+        if on != self.in_dock {
+            native::set_in_dock(on, &self.proxy);
+            self.in_dock = on;
+        }
     }
 
     // --------------------------------------------------------------- the timer
@@ -1174,24 +1187,57 @@ mod native {
     //! Cocoa's global coordinates (points, y up from the bottom of the primary display),
     //! which is also what the panel's frame and the screens' frames are in.
 
-    use super::{Point, Rect};
-    use objc2::{MainThreadMarker, MainThreadOnly as _, rc::Retained, runtime::Sel, sel};
+    use super::{Point, Rect, UiEvent};
+    use crate::AppEvent;
+    use objc2::{
+        DefinedClass as _, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, NSObject, Sel},
+        sel,
+    };
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSMenu,
-        NSMenuItem, NSPanel, NSScreen, NSStatusWindowLevel, NSView, NSWindowCollectionBehavior,
-        NSWindowSharingType, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions,
+        NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSPanel,
+        NSScreen, NSStatusWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowSharingType,
+        NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-    use std::{ffi::c_void, ptr::NonNull};
+    use std::{
+        ffi::c_void,
+        ptr::NonNull,
+        sync::atomic::{AtomicBool, Ordering},
+    };
     use winit::{
-        event_loop::ActiveEventLoop,
+        event_loop::{ActiveEventLoop, EventLoopProxy},
         raw_window_handle::{
             AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
         },
+        window::Window,
     };
-    use wry::{WebView, WebViewBuilder};
+    use wry::{WebView, WebViewBuilder, WebViewExtMacOS as _};
 
     pub const Y_UP: bool = true;
+
+    /// The notes page, inside the notes window's view rather than in its place: wry's `build`
+    /// makes its own view the window's content view, but winit takes the content view to be
+    /// winit's, so AGT crashed when the notes window stopped being key (winit's
+    /// `windowDidResignKey:` read wry's view as its own). As a child the page has to follow
+    /// the window's size and be given the keyboard, which `build` did.
+    pub fn notes_webview(builder: WebViewBuilder, window: &Window) -> wry::Result<WebView> {
+        let webview = builder.build_as_child(window)?;
+        let page = webview.webview();
+        // wry sizes a child from bounds it's given, not to its parent: fill the window's view.
+        // SAFETY: the page's superview is the window's view, alive as long as the window.
+        if let Some(parent) = unsafe { page.superview() } {
+            page.setFrame(parent.bounds());
+        }
+        page.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        webview.focus()?;
+        Ok(webview)
+    }
 
     pub struct PillWindow {
         mtm: MainThreadMarker,
@@ -1299,9 +1345,10 @@ mod native {
 
     /// The app's main menu: Edit (undo, redo, cut, copy, paste, select all) and Close Window
     /// (Cmd+W), so the notes window's text fields get the usual shortcuts: WebKit takes them
-    /// from the menu, and without one Cmd+C and Cmd+V do nothing. Never shown (AGT has no menu
-    /// bar). winit's default menu isn't installed (`with_default_menu(false)` in `main`): its
-    /// Cmd+Q in the notes window would end AGT on the spot, without stopping a meeting.
+    /// from the menu, and without one Cmd+C and Cmd+V do nothing. Shown only while AGT is in
+    /// the Dock ([`set_in_dock`]); otherwise AGT has no menu bar. winit's default menu isn't
+    /// installed (`with_default_menu(false)` in `main`): its Cmd+Q in the notes window would
+    /// end AGT on the spot, without stopping a meeting.
     pub fn install_menu() {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -1392,6 +1439,81 @@ mod native {
         }
         false
     }
+
+    /// Puts AGT in the Dock, a regular app with the menu bar from [`install_menu`], or takes
+    /// it out (a menu bar app again, as `main` starts it). Clicks on the Dock icon post
+    /// [`UiEvent::Dock`] from the first time in.
+    pub fn set_in_dock(on: bool, proxy: &EventLoopProxy<AppEvent>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let policy = if on {
+            install_menu();
+            handle_dock_clicks(mtm, proxy);
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        };
+        if NSApplication::sharedApplication(mtm).setActivationPolicy(policy) {
+            tracing::debug!("{} the Dock", if on { "in" } else { "out of" });
+        } else {
+            tracing::warn!(
+                "cannot move AGT {} the Dock",
+                if on { "into" } else { "out of" }
+            );
+        }
+    }
+
+    /// Has the "reopen" Apple Event, which a click on the Dock icon sends, post
+    /// [`UiEvent::Dock`]; once. winit's app delegate doesn't handle it, so this replaces
+    /// AppKit's handler (installed while launching, so this one has to come after).
+    fn handle_dock_clicks(mtm: MainThreadMarker, proxy: &EventLoopProxy<AppEvent>) {
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        if INSTALLED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // kCoreEventClass, kAEReopenApplication.
+        const CORE: u32 = u32::from_be_bytes(*b"aevt");
+        const REOPEN: u32 = u32::from_be_bytes(*b"rapp");
+        let handler = DockClicks::alloc(mtm).set_ivars(proxy.clone());
+        // SAFETY: NSObject's initializer.
+        let handler: Retained<DockClicks> = unsafe { msg_send![super(handler), init] };
+        // SAFETY: NSAppleEventManager's API (objc2-foundation binds it only with Core
+        // Services); the handler implements the selector, which takes the event and the reply.
+        unsafe {
+            let manager: Retained<AnyObject> =
+                msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+            let _: () = msg_send![
+                &manager,
+                setEventHandler: &*handler,
+                andSelector: sel!(agtDockClicked:withReplyEvent:),
+                forEventClass: CORE,
+                andEventID: REOPEN
+            ];
+        }
+        // The manager doesn't retain its handlers: this one lives as long as AGT.
+        std::mem::forget(handler);
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements; `DockClicks` doesn't implement Drop.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "AGTDockClicks"]
+        #[ivars = EventLoopProxy<AppEvent>]
+        struct DockClicks;
+
+        impl DockClicks {
+            /// Opening AGT again from Finder sends the same event: only one in the Dock counts.
+            #[unsafe(method(agtDockClicked:withReplyEvent:))]
+            fn clicked(&self, _event: &AnyObject, _reply: &AnyObject) {
+                let app = NSApplication::sharedApplication(self.mtm());
+                if app.activationPolicy() == NSApplicationActivationPolicy::Regular {
+                    super::post(self.ivars(), UiEvent::Dock);
+                }
+            }
+        }
+    );
 }
 
 #[cfg(windows)]
@@ -1535,6 +1657,17 @@ mod native {
 
     /// Windows has no app menu; text editing shortcuts work without one.
     pub fn install_menu() {}
+
+    /// The notes window has its own taskbar button.
+    pub fn set_in_dock(_: bool, _: &winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
+
+    /// The notes page fills the notes window, and follows its size.
+    pub fn notes_webview(
+        builder: wry::WebViewBuilder,
+        window: &winit::window::Window,
+    ) -> wry::Result<wry::WebView> {
+        builder.build(window)
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -1577,6 +1710,13 @@ mod native {
     }
     pub fn notes_hidden() {}
     pub fn install_menu() {}
+    pub fn set_in_dock(_: bool, _: &winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
+    pub fn notes_webview(
+        builder: WebViewBuilder,
+        window: &winit::window::Window,
+    ) -> wry::Result<WebView> {
+        builder.build(window)
+    }
 }
 
 #[cfg(test)]
