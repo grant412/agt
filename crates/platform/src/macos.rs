@@ -737,6 +737,7 @@ fn front_window_of(pid: i32) -> Option<i64> {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXUIElementCreateSystemWide() -> Option<NonNull<CFType>>;
+    fn AXUIElementCreateApplication(pid: i32) -> Option<NonNull<CFType>>;
     fn AXUIElementGetTypeID() -> CFTypeID;
     fn AXUIElementCopyAttributeValue(
         element: &CFType,
@@ -826,7 +827,7 @@ fn ax_element_attribute(element: &CFType, name: &'static str) -> Result<CFRetain
 }
 
 /// The accessibility element of the app with the keyboard focus, and its pid (if known);
-/// requests to it are bounded by [`AX_TIMEOUT`]. Asked of the accessibility API, not
+/// requests to it are bounded by [`AX_TIMEOUT`]. Asked of the accessibility API first, not
 /// `NSWorkspace`, whose frontmost app only follows along on a thread running the main run loop.
 fn focused_app() -> Option<(CFRetained<CFType>, Option<i32>)> {
     if !unsafe { AXIsProcessTrusted() } {
@@ -834,7 +835,19 @@ fn focused_app() -> Option<(CFRetained<CFType>, Option<i32>)> {
     }
     let all = ax_element(unsafe { AXUIElementCreateSystemWide() })?;
     unsafe { AXUIElementSetMessagingTimeout(&all, AX_TIMEOUT) };
-    let app = ax_element_attribute(&all, "AXFocusedApplication").ok()?;
+    let app = match ax_element_attribute(&all, "AXFocusedApplication") {
+        Ok(app) => app,
+        // Chrome and Electron apps (Claude, Slack) don't answer this until their accessibility
+        // tree is built, and only their own element can be asked to build it: so ask the
+        // frontmost app (AGT runs the main run loop, so `NSWorkspace` keeps up) by its pid.
+        Err(e) => {
+            let pid = NSWorkspace::sharedWorkspace()
+                .frontmostApplication()?
+                .processIdentifier();
+            tracing::debug!("focus: no focused app (accessibility error {e}); asking pid {pid}");
+            ax_element(unsafe { AXUIElementCreateApplication(pid) })?
+        }
+    };
     let mut pid = 0;
     let pid = (unsafe { AXUIElementGetPid(&app, &mut pid) } == 0).then_some(pid);
     Some((app, pid))
@@ -863,6 +876,8 @@ pub fn prepare_focus_check() {
             )
         };
         tracing::debug!("focus: pid {pid} AXManualAccessibility → {rc}");
+        // Chrome has no such switch, but builds its tree once it's asked about its focus.
+        let _ = ax_attribute(&app, "AXFocusedUIElement");
         // Asked again next time if it didn't get the message (busy, just launched).
         if rc == 0 || rc == AX_UNSUPPORTED {
             prepared().insert(pid);
