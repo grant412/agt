@@ -275,7 +275,13 @@ pub fn color_icon(n: u32) -> Vec<u8> {
 /// for 32, scaled), RGBA.
 fn rgba(style: Style, n: usize) -> Vec<u8> {
     const BLUE: [f32; 3] = [37.0, 99.0, 235.0];
-    let s = n as f32 / 32.0;
+    // The menu-bar glyph fills 80% of its canvas: macOS scales the canvas to the menu bar's
+    // height, so this is how much smaller it looks.
+    let glyph = match style {
+        Style::Template => 0.8,
+        Style::Color => 1.0,
+    };
+    let s = n as f32 / 32.0 * glyph;
     let c = (n as f32 - 1.0) / 2.0;
     let mut rgba = Vec::with_capacity(n * n * 4);
     for y in 0..n {
