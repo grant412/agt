@@ -402,10 +402,36 @@ pub fn key_down_past_hook(key: Key) -> Option<bool> {
 pub fn key_down(key: Key) -> Option<bool> {
     // The HID system state: swallowing at the session tap doesn't change it. (Events posted at
     // the HID tap do: `send_paste`'s Left Command and V, see `paste_may_release`.)
+    if unsafe { IsSecureEventInputEnabled() } {
+        let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
+        return key_down_in_secure_input(flags, key.code);
+    }
     Some(CGEventSource::key_state(
         CGEventSourceStateID::HIDSystemState,
         key.code,
     ))
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    /// Secure Keyboard Entry, on for the whole session whichever process asked (and macOS can
+    /// leave it on for loginwindow after the screen was locked).
+    fn IsSecureEventInputEnabled() -> bool;
+}
+
+/// [`key_down`] while Secure Keyboard Entry is on: every key's state then reads up, held or not.
+/// The session's modifier flags still follow the keys, though not left from right. For any
+/// other key: can't tell.
+fn key_down_in_secure_input(flags: CGEventFlags, code: u16) -> Option<bool> {
+    let flag = match code {
+        0x3B | 0x3E => CGEventFlags::MaskControl,
+        0x38 | 0x3C => CGEventFlags::MaskShift,
+        0x37 | 0x36 => CGEventFlags::MaskCommand,
+        0x3A | 0x3D => CGEventFlags::MaskAlternate,
+        KVK_FUNCTION => CGEventFlags::MaskSecondaryFn,
+        _ => return None,
+    };
+    Some(flags.contains(flag))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1729,6 +1755,21 @@ mod tests {
             assert_eq!(!down_flag(code).is_empty(), modifier, "{name}");
         }
         assert!(down_flag(CAPS_LOCK_CODE).is_empty());
+    }
+
+    #[test]
+    fn secure_input_reads_modifiers_from_the_session_flags() {
+        let code = |n| Key::parse(n).unwrap().code;
+        let fn_held = CGEventFlags::MaskSecondaryFn;
+        assert_eq!(key_down_in_secure_input(fn_held, code("Fn")), Some(true));
+        let control_held = CGEventFlags::MaskControl;
+        let left = code("LeftControl");
+        assert_eq!(key_down_in_secure_input(control_held, left), Some(true));
+        assert_eq!(key_down_in_secure_input(fn_held, left), Some(false));
+        let none = CGEventFlags::empty();
+        assert_eq!(key_down_in_secure_input(none, code("Fn")), Some(false));
+        // Not a modifier: its state reads up, so "can't tell", never "released".
+        assert_eq!(key_down_in_secure_input(none, code("F13")), None);
     }
 
     #[test]
