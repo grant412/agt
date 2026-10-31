@@ -15,7 +15,9 @@
 
 use crate::{
     Capture, Error, Hotkey, HotkeyEvent, Hotkeys, Key, LoginItem, MicUser, Permission,
-    capture::KeyCapture, hotkeys::Detector, keys::CAPS_LOCK_CODE,
+    capture::KeyCapture,
+    hotkeys::Detector,
+    keys::{CAPS_LOCK_CODE, MIDDLE_MOUSE_CODE},
 };
 use block2::RcBlock;
 use objc2::{
@@ -60,6 +62,8 @@ const TAP_RETRY: Duration = Duration::from_secs(1);
 
 // Virtual key codes (Carbon `kVK_*`).
 const KVK_COMMAND: u16 = 0x37;
+/// `kCGMouseEventButtonNumber` of the middle button.
+const MIDDLE_MOUSE_BUTTON: i64 = 2;
 const KVK_ESCAPE: u16 = 0x35;
 const KVK_FUNCTION: u16 = 0x3F;
 /// The key event macOS sends right after Fn is released on its own, which apps act on with
@@ -150,6 +154,8 @@ struct Shared {
     /// Whether a key of any hotkey can be swallowed (one that isn't a modifier: F13-F20, A,
     /// Space...), or `hide_globe`: both take an active tap.
     swallow: bool,
+    /// Whether a hotkey uses the middle mouse button: the tap listens to it then.
+    middle_mouse: bool,
     /// Whether one of the hotkeys is Fn alone, whose every tap is followed by [`KVK_GLOBE`]:
     /// apps never see that, or each dictation would also do what "Press 🌐 key to" says (the
     /// emoji picker, by default), which then takes the paste. Fn itself still reaches apps.
@@ -212,9 +218,15 @@ pub fn start_hotkey(
         .iter()
         .flat_map(Hotkey::keys)
         .any(Key::swallowed);
+    let middle_mouse = hotkeys
+        .list()
+        .iter()
+        .flat_map(Hotkey::keys)
+        .any(|k| k.code == MIDDLE_MOUSE_CODE);
     let shared = Arc::new(Shared {
         swallow: swallow || hide_globe,
         hide_globe,
+        middle_mouse,
         stop: AtomicBool::new(false),
         state: Mutex::new(TapState {
             detector: Detector::new(&hotkeys),
@@ -283,9 +295,12 @@ fn create_tap(shared: &Arc<Shared>) -> Option<CFRetained<CFMachPort>> {
     if !(post_access() || (!shared.swallow && listen_access())) {
         return None;
     }
-    let mask = (1u64 << CGEventType::KeyDown.0)
+    let mut mask = (1u64 << CGEventType::KeyDown.0)
         | (1u64 << CGEventType::KeyUp.0)
         | (1u64 << CGEventType::FlagsChanged.0);
+    if shared.middle_mouse {
+        mask |= (1u64 << CGEventType::OtherMouseDown.0) | (1u64 << CGEventType::OtherMouseUp.0);
+    }
     // Active whenever Accessibility allows it: the hotkey may have to be swallowed,
     // and so may Esc while it ends a hands-free recording ([`crate::arm_escape`]).
     let options = if post_access() {
@@ -335,7 +350,17 @@ unsafe extern "C-unwind" fn tap_callback(
     if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == INJECTED_MARK {
         return pass;
     }
-    let code = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16;
+    let mouse = matches!(ty, CGEventType::OtherMouseDown | CGEventType::OtherMouseUp);
+    if mouse
+        && CGEvent::integer_value_field(Some(ev), CGEventField::MouseEventButtonNumber)
+            != MIDDLE_MOUSE_BUTTON
+    {
+        return pass;
+    }
+    let code = match mouse {
+        true => MIDDLE_MOUSE_CODE,
+        false => CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16,
+    };
     if shared.hide_globe
         && code == KVK_GLOBE
         && matches!(ty, CGEventType::KeyDown | CGEventType::KeyUp)
@@ -344,8 +369,8 @@ unsafe extern "C-unwind" fn tap_callback(
     }
     let flags = CGEvent::flags(Some(ev));
     let down = match ty {
-        CGEventType::KeyDown => true,
-        CGEventType::KeyUp => false,
+        CGEventType::KeyDown | CGEventType::OtherMouseDown => true,
+        CGEventType::KeyUp | CGEventType::OtherMouseUp => false,
         // A modifier is down while its flag is set. Caps Lock (and any other key that changes
         // the flags but isn't a modifier in KEYS) is left alone: as another key, it would
         // cancel a hold.
@@ -400,6 +425,11 @@ pub fn key_down_past_hook(key: Key) -> Option<bool> {
 }
 
 pub fn key_down(key: Key) -> Option<bool> {
+    // Can't tell: an app such as Logi Options+ may synthesize the button, and swallowing it
+    // leaves no state to trust. Its release comes from the tap.
+    if key.code == MIDDLE_MOUSE_CODE {
+        return None;
+    }
     // The HID system state: swallowing at the session tap doesn't change it. (Events posted at
     // the HID tap do: `send_paste`'s Left Command and V, see `paste_may_release`.)
     if unsafe { IsSecureEventInputEnabled() } {

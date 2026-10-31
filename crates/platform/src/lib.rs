@@ -299,6 +299,8 @@ impl Hotkey {
         };
         if is_spare_f_key(key.name) {
             None
+        } else if key.name == "MiddleMouse" {
+            Some("AGT takes this button over: it won't middle-click in other apps while AGT runs.")
         } else if self.keys.len() == 1 {
             Some("AGT takes this key over: it won't type in other apps while AGT runs.")
         } else if types_character(key.name)
@@ -821,6 +823,15 @@ impl HoldDetector {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn middle_mouse_is_a_hotkey_with_its_own_warning() {
+        let hotkey = super::Hotkey::parse("MiddleMouse").unwrap();
+        assert_eq!(hotkey.label(), "Middle Mouse Button");
+        assert!(hotkey.warning().unwrap().contains("middle-click"));
+        assert_eq!(super::key_down(hotkey.keys()[0]), None);
+    }
+
     use super::*;
     #[cfg(not(target_os = "macos"))]
     use KeyKind::Masked;

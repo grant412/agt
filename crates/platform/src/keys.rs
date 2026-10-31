@@ -331,7 +331,18 @@ pub const KEYS: &[(&str, &str, u16, KeyKind)] = &[
     ("Help", "Help", 0x72, Swallowed),
     // The key ISO keyboards have left of 1 (`kVK_ISO_Section`).
     ("Section", "§", 0x0A, Swallowed),
+    (
+        "MiddleMouse",
+        "Middle Mouse Button",
+        MIDDLE_MOUSE_CODE,
+        Swallowed,
+    ),
 ];
+
+/// The middle mouse button's code in [`KEYS`], past every virtual key code. The hotkey tap
+/// listens to that button only when a hotkey uses it.
+#[cfg(target_os = "macos")]
+pub(crate) const MIDDLE_MOUSE_CODE: u16 = 0x100;
 
 #[cfg(target_os = "macos")]
 pub(crate) const CHORD_EXAMPLE: &str = "Fn+RightOption";
@@ -374,6 +385,7 @@ pub(crate) const MENU_KEYS: &[&str] = &[];
 /// see [`types_character`].
 #[cfg(target_os = "macos")]
 pub(crate) const NON_CHARACTER_KEYS: &[&str] = &[
+    "MiddleMouse",
     "Tab",
     "Return",
     "Backspace",
